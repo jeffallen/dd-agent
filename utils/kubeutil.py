@@ -16,6 +16,8 @@ from utils.checkfiles import get_conf_path
 from utils.http import retrieve_json
 from utils.singleton import Singleton
 
+import requests
+
 log = logging.getLogger('collector')
 
 KUBERNETES_CHECK_NAME = 'kubernetes'
@@ -34,6 +36,9 @@ class KubeUtil():
     DEFAULT_CADVISOR_PORT = 4194
     DEFAULT_KUBELET_PORT = 10255
     DEFAULT_MASTER_PORT = 8080
+    DEFAULT_MASTER_NAME = 'kubernetes'  # DNS name to reach the master from a pod.
+    CA_CRT_PATH = '/run/secrets/kubernetes.io/serviceaccount/ca.crt'
+    AUTH_TOKEN_PATH = '/run/secrets/kubernetes.io/serviceaccount/token'
 
     POD_NAME_LABEL = "io.kubernetes.pod.name"
     NAMESPACE_LABEL = "io.kubernetes.pod.namespace"
@@ -58,12 +63,13 @@ class KubeUtil():
         self.cadvisor_port = instance.get('port', KubeUtil.DEFAULT_CADVISOR_PORT)
         self.kubelet_port = instance.get('kubelet_port', KubeUtil.DEFAULT_KUBELET_PORT)
 
-        self.metrics_url = urljoin(
-            '%s://%s:%d' % (self.method, self.host, self.cadvisor_port), KubeUtil.METRICS_PATH)
-        self.pods_list_url = urljoin(
-            '%s://%s:%d' % (self.method, self.host, self.kubelet_port), KubeUtil.PODS_LIST_PATH)
+        self.kubelet_api_url = '%s://%s:%d' % (self.method, self.host, self.kubelet_port)
+        self.cadvisor_url = '%s://%s:%d' % (self.method, self.host, self.cadvisor_port)
+        self.kubernetes_api_url = 'https://%s/api/v1' % self.DEFAULT_MASTER_NAME
 
-        self.kube_health_url = '%s://%s:%d/healthz' % (self.method, self.host, self.kubelet_port)
+        self.metrics_url = urljoin(self.cadvisor_url, KubeUtil.METRICS_PATH)
+        self.pods_list_url = urljoin(self.kubelet_api_url, KubeUtil.PODS_LIST_PATH)
+        self.kube_health_url = urljoin(self.kubelet_api_url, 'healthz')
 
     def get_kube_labels(self, excluded_keys=None):
         pods = retrieve_json(self.pods_list_url)
@@ -93,8 +99,49 @@ class KubeUtil():
 
         return kube_labels
 
+    def extract_uids(self, pods_list):
+        """
+        Exctract uids from a list of pods coming from the kubelet API.
+        """
+        uids = []
+        pods = pods_list.get("items") or []
+        for p in pods:
+            uid = p.get('metadata', {}).get('uid')
+            if uid is not None:
+                uids.append(uid)
+        return uids
+
     def retrieve_pods_list(self):
         return retrieve_json(self.pods_list_url)
+
+    def filter_pods_list(self, pods_list, host_ip):
+        """
+        Filter out (in place) pods that are not running on the given host.
+        """
+        filtered_pods = []
+        pod_items = pods_list.get('items') or []
+        log.debug('Found {} pods to filter'.format(pod_items))
+        for pod in pod_items:
+            status = pod.get('status', {})
+            if status.get('hostIP') == host_ip:
+                filtered_pods.append(pod)
+        pods_list['items'] = filtered_pods
+        return pods_list
+
+    def retrieve_json_auth(self, url, auth_token, timeout=10):
+        """
+        Kubernetes API requires authentication using a token available in
+        every pod.
+
+        We try to verify ssl certificate if available.
+        """
+        verify = self.CA_CRT_PATH if os.path.exists(self.CA_CRT_PATH) else False
+        log.debug('ssl validation: {}'.format(verify))
+        headers = {'Authorization': 'Bearer {}'.format(auth_token)}
+        log.debug('HTTP headers: {}'.format(headers))
+        r = requests.get(url, timeout=timeout, headers=headers, verify=verify)
+        r.raise_for_status()
+        return r.json()
 
     @classmethod
     def _get_default_router(cls):
@@ -106,5 +153,18 @@ class KubeUtil():
                         return socket.inet_ntoa(struct.pack('<L', int(fields[2], 16)))
         except IOError, e:
             log.error('Unable to open /proc/net/route: %s', e)
+
+        return None
+
+    @classmethod
+    def get_auth_token(cls):
+        """
+        Return a string containing the token read from file
+        """
+        try:
+            with open(cls.AUTH_TOKEN_PATH) as f:
+                return f.read()
+        except IOError as e:
+            log.error('Unable to read token from {}: {}'.format(cls.AUTH_TOKEN_PATH, e))
 
         return None

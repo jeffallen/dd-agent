@@ -10,10 +10,10 @@ from collections import defaultdict
 from fnmatch import fnmatch
 import numbers
 import re
-import simplejson as json
 
 # 3rd party
 import requests
+import simplejson as json
 
 # project
 from checks import AgentCheck
@@ -45,6 +45,7 @@ FUNC_MAP = {
     GAUGE: {True: HISTO, False: GAUGE},
     RATE: {True: HISTORATE, False: RATE}
 }
+
 
 class Kubernetes(AgentCheck):
     """ Collect metrics and events from kubelet """
@@ -106,11 +107,16 @@ class Kubernetes(AgentCheck):
         self.publish_rate = FUNC_MAP[RATE][self.use_histogram]
         self.publish_gauge = FUNC_MAP[GAUGE][self.use_histogram]
 
+        pods_list = self.kubeutil.retrieve_pods_list()
+
         # kubelet health checks
         self._perform_kubelet_checks(self.kubeutil.kube_health_url)
 
         # kubelet metrics
-        self._update_metrics(instance)
+        self._update_metrics(instance, pods_list)
+
+        # kubelet events
+        self._process_events(instance, pods_list)
 
     def _publish_raw_metrics(self, metric, dat, tags, depth=0):
         if depth >= self.max_depth:
@@ -186,7 +192,6 @@ class Kubernetes(AgentCheck):
 
         return tags
 
-
     def _update_container_metrics(self, instance, subcontainer, kube_labels):
         tags = list(instance.get('tags', []))  # add support for custom tags
 
@@ -237,8 +242,7 @@ class Kubernetes(AgentCheck):
     def _retrieve_metrics(self, url):
         return retrieve_json(url)
 
-    def _update_metrics(self, instance):
-        pods_list = self.kubeutil.retrieve_pods_list()
+    def _update_metrics(self, instance, pods_list):
         metrics = self._retrieve_metrics(self.kubeutil.metrics_url)
 
         excluded_labels = instance.get('excluded_labels')
@@ -280,3 +284,24 @@ class Kubernetes(AgentCheck):
             _tags = tags[:]  # copy base tags
             _tags.append('kube_replication_controller:{0}'.format(ctrl))
             self.publish_gauge(self, NAMESPACE + '.pods.running', pod_count, _tags)
+
+    def _process_events(self, instance, pods_list):
+        """
+        Retrieve a list of events from kubelet that is relevant for the host the
+        agent is running on.
+        """
+        pods = self.kubeutil.filter_pods_list(pods_list, self.kubeutil.host)
+        pod_uids = self.kubeutil.extract_uids(pods)
+
+        k8s_namespace = instance.get('namespace', 'default')
+        events_endpoint = '{}/namespaces/{}/events'.format(self.kubeutil.kubernetes_api_url, k8s_namespace)
+        self.log.debug('Kubernetes API endpoint to query events: %s' % events_endpoint)
+
+        events = self.kubeutil.retrieve_json_auth(events_endpoint, self.kubeutil.get_auth_token())
+        event_items = events.get('items') or []
+        self.log.debug('Found {} events, filtering out unwanted ones...'.format(len(event_items)))
+
+        for event in event_items:
+            involved_obj = event.get('involvedObject')
+            if involved_obj and involved_obj.get('uid') in pod_uids:
+                self.log.error('Should post this event:', event.get('reason'), event.get('message'))
