@@ -59,6 +59,8 @@ class KubeUtil():
 
         self.method = instance.get('method', KubeUtil.DEFAULT_METHOD)
         self.host = instance.get("host") or self._get_default_router()
+        self.host_ip = None  # lazy initialization
+        self.host_name = os.environ.get('HOSTNAME')
 
         self.cadvisor_port = instance.get('port', KubeUtil.DEFAULT_CADVISOR_PORT)
         self.kubelet_port = instance.get('kubelet_port', KubeUtil.DEFAULT_KUBELET_PORT)
@@ -72,7 +74,7 @@ class KubeUtil():
         self.kube_health_url = urljoin(self.kubelet_api_url, 'healthz')
 
     def get_kube_labels(self, excluded_keys=None):
-        pods = retrieve_json(self.pods_list_url)
+        pods = self.retrieve_pods_list()
         return self.extract_kube_labels(pods, excluded_keys=excluded_keys)
 
     def extract_kube_labels(self, pods_list, excluded_keys=None):
@@ -118,15 +120,17 @@ class KubeUtil():
         """
         Filter out (in place) pods that are not running on the given host.
         """
-        filtered_pods = []
         pod_items = pods_list.get('items') or []
         log.debug('Found {} pods to filter'.format(len(pod_items)))
+
+        filtered_pods = []
         for pod in pod_items:
             status = pod.get('status', {})
             if status.get('hostIP') == host_ip:
                 filtered_pods.append(pod)
-        pods_list['items'] = filtered_pods
         log.debug('Pods after filtering: {}'.format(len(filtered_pods)))
+
+        pods_list['items'] = filtered_pods
         return pods_list
 
     def retrieve_json_auth(self, url, auth_token, timeout=10):
@@ -144,8 +148,28 @@ class KubeUtil():
         r.raise_for_status()
         return r.json()
 
+    def get_host_ip(self):
+        """
+        The host ip address is different from the default router for the pod.
+        We get it from the payload returned by the listing pods endpoints from
+        kubelet or kuberentes API.
+        """
+        if self.host_ip is None:
+            pod_items = self.retrieve_pods_list().get("items") or []
+            for pod in pod_items:
+                metadata = pod.get("metadata", {})
+                name = metadata.get("name")
+                if name == self.host_name:
+                    status = pod.get('status', {})
+                    self.host_ip = status.get('hostIP')
+                    break
+        return self.host_ip
+
     @classmethod
     def _get_default_router(cls):
+        """
+        Return the IP address of the default router for the pod.
+        """
         try:
             with open('/proc/net/route') as f:
                 for line in f.readlines():
@@ -160,7 +184,7 @@ class KubeUtil():
     @classmethod
     def get_auth_token(cls):
         """
-        Return a string containing the token read from file
+        Return a string containing the authorization token for the pod.
         """
         try:
             with open(cls.AUTH_TOKEN_PATH) as f:

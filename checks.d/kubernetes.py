@@ -290,7 +290,7 @@ class Kubernetes(AgentCheck):
         Retrieve a list of events from kubelet that is relevant for the host the
         agent is running on.
         """
-        pods = self.kubeutil.filter_pods_list(pods_list, self.kubeutil.host)
+        pods = self.kubeutil.filter_pods_list(pods_list, self.kubeutil.host_ip)
         pod_uids = self.kubeutil.extract_uids(pods)
 
         k8s_namespace = instance.get('namespace', 'default')
