@@ -120,12 +120,13 @@ class KubeUtil():
         """
         filtered_pods = []
         pod_items = pods_list.get('items') or []
-        log.debug('Found {} pods to filter'.format(pod_items))
+        log.debug('Found {} pods to filter'.format(len(pod_items)))
         for pod in pod_items:
             status = pod.get('status', {})
             if status.get('hostIP') == host_ip:
                 filtered_pods.append(pod)
         pods_list['items'] = filtered_pods
+        log.debug('Pods after filtering: {}'.format(len(filtered_pods)))
         return pods_list
 
     def retrieve_json_auth(self, url, auth_token, timeout=10):
