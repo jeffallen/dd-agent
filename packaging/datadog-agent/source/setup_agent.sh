@@ -40,7 +40,7 @@ SUPERVISOR_VERSION="3.1.3"
 #
 #
 # $IS_OPENSHIFT DEPRECATED!
-#   Used to be a different setup for OpenShift, it's no a noop, upgrade
+#   Used to be a different setup for OpenShift, it is now a noop, upgrade
 #   your cartridge if you're using it.
 #######################################################################
 set +u # accept temporarily unbound vars, because we set defaults
