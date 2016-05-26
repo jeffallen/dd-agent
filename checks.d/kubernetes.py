@@ -290,8 +290,8 @@ class Kubernetes(AgentCheck):
         Retrieve a list of events from kubelet that is relevant for the host the
         agent is running on.
         """
-        pods = self.kubeutil.filter_pods_list(pods_list, self.kubeutil.host_ip)
-        pod_uids = self.kubeutil.extract_uids(pods)
+        pods = self.kubeutil.filter_pods_list(pods_list, self.kubeutil.get_host_ip())
+        pod_uids = self.kubeutil.extract_meta(pods, 'uid')
 
         k8s_namespace = instance.get('namespace', 'default')
         events_endpoint = '{}/namespaces/{}/events'.format(self.kubeutil.kubernetes_api_url, k8s_namespace)
@@ -304,4 +304,4 @@ class Kubernetes(AgentCheck):
         for event in event_items:
             involved_obj = event.get('involvedObject')
             if involved_obj and involved_obj.get('uid') in pod_uids:
-                self.log.error('Should post this event:', event.get('reason'), event.get('message'))
+                self.log.error('Should post this event: {}, reason: {}'.format(event.get('message'), event.get('reason')))

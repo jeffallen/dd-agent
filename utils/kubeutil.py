@@ -59,7 +59,7 @@ class KubeUtil():
 
         self.method = instance.get('method', KubeUtil.DEFAULT_METHOD)
         self.host = instance.get("host") or self._get_default_router()
-        self.host_ip = None  # lazy initialization
+        self._host_ip = None  # lazy initialization
         self.host_name = os.environ.get('HOSTNAME')
 
         self.cadvisor_port = instance.get('port', KubeUtil.DEFAULT_CADVISOR_PORT)
@@ -101,14 +101,14 @@ class KubeUtil():
 
         return kube_labels
 
-    def extract_uids(self, pods_list):
+    def extract_meta(self, pods_list, field_name):
         """
         Exctract uids from a list of pods coming from the kubelet API.
         """
         uids = []
         pods = pods_list.get("items") or []
         for p in pods:
-            uid = p.get('metadata', {}).get('uid')
+            uid = p.get('metadata', {}).get(field_name)
             if uid is not None:
                 uids.append(uid)
         return uids
@@ -154,16 +154,16 @@ class KubeUtil():
         We get it from the payload returned by the listing pods endpoints from
         kubelet or kuberentes API.
         """
-        if self.host_ip is None:
+        if self._host_ip is None:
             pod_items = self.retrieve_pods_list().get("items") or []
             for pod in pod_items:
                 metadata = pod.get("metadata", {})
                 name = metadata.get("name")
                 if name == self.host_name:
                     status = pod.get('status', {})
-                    self.host_ip = status.get('hostIP')
+                    self._host_ip = status.get('hostIP')
                     break
-        return self.host_ip
+        return self._host_ip
 
     @classmethod
     def _get_default_router(cls):
