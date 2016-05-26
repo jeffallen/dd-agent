@@ -316,13 +316,14 @@ class Kubernetes(AgentCheck):
         self._last_event_collection_ts[instance.get('port')] = last_ts
 
         for event in event_items:
-            if event.get('lastTimestamp') < last_ts:
+            event_ts = int(time.mktime(time.strptime(event.get('lastTimestamp'), '%Y-%m-%dT%H:%M:%SZ')))
+            if event_ts < last_ts:
                 continue
 
             involved_obj = event.get('involvedObject')
             if involved_obj and involved_obj.get('uid') in pod_uids:
                 self.log.error('Should post this event: {}, reason: {}'.format(event.get('message'), event.get('reason')))
-                title = '%s %s on %s'.format(involved_obj.get('name'), event.get('reason'), node_name)
+                title = '{} {} on {}'.format(involved_obj.get('name'), event.get('reason'), node_name)
                 message = event.get('message')
                 source = event.get('source')
                 if source:
