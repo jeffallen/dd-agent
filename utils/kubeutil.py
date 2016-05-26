@@ -59,7 +59,7 @@ class KubeUtil():
 
         self.method = instance.get('method', KubeUtil.DEFAULT_METHOD)
         self.host = instance.get("host") or self._get_default_router()
-        self._host_ip = None  # lazy initialization
+        self._node_ip = self._node_name = None  # lazy evaluation
         self.host_name = os.environ.get('HOSTNAME')
 
         self.cadvisor_port = instance.get('port', KubeUtil.DEFAULT_CADVISOR_PORT)
@@ -103,7 +103,8 @@ class KubeUtil():
 
     def extract_meta(self, pods_list, field_name):
         """
-        Exctract uids from a list of pods coming from the kubelet API.
+        Exctract fields like `uid` or `name` from the `metadata` section of a
+        list of pods coming from the kubelet API.
         """
         uids = []
         pods = pods_list.get("items") or []
@@ -114,7 +115,18 @@ class KubeUtil():
         return uids
 
     def retrieve_pods_list(self):
+        """
+        Retrieve the list of pods for this cluster querying the kubelet API.
+
+        TODO: the list of pods could be cached with some policy to be decided.
+        """
         return retrieve_json(self.pods_list_url)
+
+    def retrieve_metrics(self):
+        """
+        Retrieve metrics from Cadvisor.
+        """
+        return retrieve_json(self.metrics_url)
 
     def filter_pods_list(self, pods_list, host_ip):
         """
@@ -148,22 +160,32 @@ class KubeUtil():
         r.raise_for_status()
         return r.json()
 
-    def get_host_ip(self):
+    def get_node_info(self):
         """
-        The host ip address is different from the default router for the pod.
-        We get it from the payload returned by the listing pods endpoints from
-        kubelet or kuberentes API.
+        Return the IP address and the hostname of the node where the pod is running.
         """
-        if self._host_ip is None:
-            pod_items = self.retrieve_pods_list().get("items") or []
-            for pod in pod_items:
-                metadata = pod.get("metadata", {})
-                name = metadata.get("name")
-                if name == self.host_name:
-                    status = pod.get('status', {})
-                    self._host_ip = status.get('hostIP')
-                    break
-        return self._host_ip
+        if None in (self._node_ip, self._node_name):
+            self._fetch_host_data()
+        return self._node_ip, self._node_name
+
+    def _fetch_host_data(self):
+        """
+        Retrieve host name and IP address from the payload returned by the listing
+        pods endpoints from kubelet or kuberentes API.
+
+        The host IP address is different from the default router for the pod.
+        """
+        pod_items = self.retrieve_pods_list().get("items") or []
+        for pod in pod_items:
+            metadata = pod.get("metadata", {})
+            name = metadata.get("name")
+            if name == self.host_name:
+                status = pod.get('status', {})
+                spec = pod.get('spec', {})
+                # if not found, use an empty string - we use None as "not initialized"
+                self._node_ip = status.get('hostIP', '')
+                self._node_name = spec.get('nodeName', '')
+                break
 
     @classmethod
     def _get_default_router(cls):

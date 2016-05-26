@@ -10,6 +10,7 @@ from collections import defaultdict
 from fnmatch import fnmatch
 import numbers
 import re
+import time
 
 # 3rd party
 import requests
@@ -18,7 +19,6 @@ import simplejson as json
 # project
 from checks import AgentCheck
 from config import _is_affirmative
-from utils.http import retrieve_json
 from utils.kubeutil import KubeUtil
 
 NAMESPACE = "kubernetes"
@@ -46,6 +46,8 @@ FUNC_MAP = {
     RATE: {True: HISTORATE, False: RATE}
 }
 
+EVENT_TYPE = 'kubernetes'
+
 
 class Kubernetes(AgentCheck):
     """ Collect metrics and events from kubelet """
@@ -59,6 +61,8 @@ class Kubernetes(AgentCheck):
         self.kubeutil = KubeUtil()
         if not self.kubeutil.host:
             raise Exception('Unable to get default router and host parameter is not set')
+
+        self._last_event_collection_ts = defaultdict(lambda: None)
 
     def _perform_kubelet_checks(self, url):
         service_check_base = NAMESPACE + '.kubelet.check'
@@ -239,11 +243,8 @@ class Kubernetes(AgentCheck):
                               sum(float(net[x]) for x in NET_ERRORS),
                               tags)
 
-    def _retrieve_metrics(self, url):
-        return retrieve_json(url)
-
     def _update_metrics(self, instance, pods_list):
-        metrics = self._retrieve_metrics(self.kubeutil.metrics_url)
+        metrics = self.kubeutil.retrieve_metrics()
 
         excluded_labels = instance.get('excluded_labels')
         kube_labels = self.kubeutil.extract_kube_labels(pods_list, excluded_keys=excluded_labels)
@@ -289,8 +290,18 @@ class Kubernetes(AgentCheck):
         """
         Retrieve a list of events from kubelet that is relevant for the host the
         agent is running on.
+
+        At the moment there is no support to select events based on a timestamp query, so we
+        go through the whole list every time. This should be fine for now as events
+        have a TTL of one hour[1] but logic needs to improve as soon as they provide
+        query capabilities or at least pagination, see [2][3].
+
+        [1] https://github.com/kubernetes/kubernetes/blob/master/cmd/kube-apiserver/app/options/options.go#L50
+        [2] https://github.com/kubernetes/kubernetes/issues/4432
+        [3] https://github.com/kubernetes/kubernetes/issues/1362
         """
-        pods = self.kubeutil.filter_pods_list(pods_list, self.kubeutil.get_host_ip())
+        node_ip, node_name = self.kubeutil.get_node_info()
+        pods = self.kubeutil.filter_pods_list(pods_list, node_ip)
         pod_uids = self.kubeutil.extract_meta(pods, 'uid')
 
         k8s_namespace = instance.get('namespace', 'default')
@@ -301,7 +312,30 @@ class Kubernetes(AgentCheck):
         event_items = events.get('items') or []
         self.log.debug('Found {} events, filtering out unwanted ones...'.format(len(event_items)))
 
+        last_ts = int(time.time())
+        self._last_event_collection_ts[instance.get('port')] = last_ts
+
         for event in event_items:
+            if event.get('lastTimestamp') < last_ts:
+                continue
+
             involved_obj = event.get('involvedObject')
             if involved_obj and involved_obj.get('uid') in pod_uids:
                 self.log.error('Should post this event: {}, reason: {}'.format(event.get('message'), event.get('reason')))
+                title = '%s %s on %s'.format(involved_obj.get('name'), event.get('reason'), node_name)
+                message = event.get('message')
+                source = event.get('source')
+                if source:
+                    message += '\nSource: {} {}\n'.format(source.get('component', ''), source.get('host', ''))
+                msg_body = "%%%\n{}\n```\n{}\n```\n%%%".format(title, message)
+                dd_event = {
+                    'timestamp': last_ts,
+                    'host': self.kubeutil.host,
+                    'event_type': EVENT_TYPE,
+                    'msg_title': title,
+                    'msg_text': msg_body,
+                    'source_type_name': EVENT_TYPE,
+                    'event_object': 'kubernetes:{}'.format(involved_obj.get('name')),
+                }
+                self.log.debug('Posting event: {}'.format(dd_event))
+                self.event(dd_event)
